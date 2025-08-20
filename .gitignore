@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual Environments
+env/
+venv/
+ENV/
+.venv/
+.python-version
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Bytecode / cache
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.cache
+
+# Logs
+*.log
+*.log.*
+
+# Test output
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# Pydantic compiled models (if used)
+*.pydantic
+
+# dotenv environment variables
+.env
+.env.*
+
+# SQLite (if using local db)
+*.sqlite3
+*.db
+
+# FastAPI generated files (OpenAPI cache if any)
+openapi.json
+
+# Docker
+*.pid
+*.seed
+*.pid.lock
+docker-compose.override.yml
+
+# MacOS
+.DS_Store
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Jupyter notebooks (if any)
+.ipynb_checkpoints/
