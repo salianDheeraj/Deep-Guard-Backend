@@ -1,4 +1,4 @@
-/* 
+
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
@@ -35,4 +35,4 @@ console.log('Server is checking for file at:', videoPath);
               res.status(500).json({ error: 'Analysis failed' });
   }
 });
-module.exports = router; */
+module.exports = router;

@@ -3,8 +3,7 @@ require('dotenv').config();
 
 // Validate environment variables first
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-  console.error('❌ ERROR: Missing Supabase credentials');
-  process.exit(1);
+  console.warn('⚠️ WARNING: Missing Supabase credentials - auth will not work');
 }
 
 const supabase = createClient(
@@ -25,8 +24,9 @@ const connectDB = async () => {
     
     console.log('✅ Supabase Database Connected');
   } catch (error) {
-    console.error('❌ Supabase Connection Failed:', error.message);
-    process.exit(1); // Exit like MongoDB does
+    console.error('❌ Supabase Connection Error:', error.message);
+    // Don't exit, just warn
+    console.log('⚠️ Continuing without DB connection...');
   }
 };
 
