@@ -9,10 +9,11 @@ const protect = async (req, res, next) => {
       token = req.headers.authorization.split(' ')[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+      // FIX: Changed from decoded.id to decoded.userId
       const { data: user, error } = await supabase
         .from('users')
         .select('*')
-        .eq('id', decoded.id)
+        .eq('id', decoded.userId)
         .single();
 
       if (error || !user) {
