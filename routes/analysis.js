@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
-const { supabase } = require('../config/supabase');
+const { supabase} = require('../config/supabase');
 const authMiddleware = require('../middleware/auth');
 
 const upload = multer({ storage: multer.memoryStorage() });

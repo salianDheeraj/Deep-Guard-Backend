@@ -2,17 +2,19 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const path = require('path');
-const authMiddleware= require('./middleware/auth');
+const authMiddleware = require('./middleware/auth');
 const logger = require('./middleware/logger');
 const errorHandler = require('./middleware/errorHandler');
-const mlRoutes = require('./routes/ml-service');
-// ✅ IMPORT SUPABASE
-const { connectDB } = require('./config/supabase');
+const mlServices = require('./routes/ml-service');
+const { connectDB,supabaseAdmin } = require('./config/supabase');
+
+const userRoutes = require('./routes/userRoutes');
+const analysisRouter = require('./routes/analysis');
 
 // Load env vars
 dotenv.config();
 
-// Import routes with error handling
+// Import auth routes
 let authRoutes;
 try {
   authRoutes = require('./routes/auth');
@@ -21,59 +23,47 @@ try {
   console.error('❌ Auth routes error:', err.message);
 }
 
-const userRoutes = require('./routes/userRoutes');
-const analysisRouter = require('./routes/analysis');
-
-
-// ✅ CONNECT TO SUPABASE
+// Connect to Supabase
 connectDB()
   .then(() => console.log('✅ Database connected'))
   .catch(err => console.error('❌ DB connection failed:', err.message));
 
 const app = express();
 
-// ============ MIDDLEWARE (BEFORE routes) ============
-
-// Logger - logs all requests
+// ============ MIDDLEWARE ============
 app.use(logger);
-
-// CORS
 app.use(cors({
   origin: 'http://localhost:3000', 
 }));
 
-
-
-// Body parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============ ROUTES ============
 
-// Auth routes (no protect middleware)
+// Auth (no auth needed)
 if (authRoutes) {
   app.use('/auth', authRoutes);
 } else {
   console.error('⚠️ Auth routes not loaded!');
 }
 
-
+// Analysis upload (protected)
 app.use('/api/analysis', authMiddleware, analysisRouter);
 
-app.use('/api/ml', mlRoutes);
+// ✅ ML routes (protected) - ONLY ONE!
+app.use('/api/ml/analyze',authMiddleware, mlServices);
+  // ✅ CORRECT - no middleware here
+
+
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'Backend running' });
 });
 
-// ============ ERROR HANDLER (MUST be LAST) ============
+// ============ ERROR HANDLER ============
 app.use(errorHandler);
-
-
-
 
 // ============ START SERVER ============
 const PORT = process.env.PORT || 5000;

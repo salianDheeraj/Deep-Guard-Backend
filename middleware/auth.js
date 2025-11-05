@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { supabase } = require('../config/supabase');
+const { supabase,supabaseAdmin } = require('../config/supabase');
 
 const authMiddleware = async (req, res, next) => {
   let token;
