@@ -2,7 +2,12 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const path = require('path');
-const { protect } = require('./middleware/auth');
+const authMiddleware= require('./middleware/auth');
+const logger = require('./middleware/logger');
+const errorHandler = require('./middleware/errorHandler');
+const mlRoutes = require('./routes/ml-service');
+// ✅ IMPORT SUPABASE
+const { connectDB } = require('./config/supabase');
 
 // Load env vars
 dotenv.config();
@@ -18,50 +23,59 @@ try {
 
 const userRoutes = require('./routes/userRoutes');
 const analysisRouter = require('./routes/analysis');
-const newchats = require('./routes/newchat');
 
-// Import DB connection
-const { connectDB } = require('./config/supabase');
 
-// Try connecting
-connectDB().catch(err => console.log('DB connection warning:', err));
+// ✅ CONNECT TO SUPABASE
+connectDB()
+  .then(() => console.log('✅ Database connected'))
+  .catch(err => console.error('❌ DB connection failed:', err.message));
 
 const app = express();
 
-// Middleware (BEFORE routes)
+// ============ MIDDLEWARE (BEFORE routes) ============
+
+// Logger - logs all requests
+app.use(logger);
+
+// CORS
 app.use(cors({
   origin: 'http://localhost:3000', 
 }));
+
+
+
+// Body parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Routes
+// ============ ROUTES ============
+
+// Auth routes (no protect middleware)
 if (authRoutes) {
-  app.use('/auth', authRoutes); // No protect middleware here
+  app.use('/auth', authRoutes);
 } else {
   console.error('⚠️ Auth routes not loaded!');
 }
 
-// Protected routes
-app.use('/api/users', protect, userRoutes);
-app.use('/api/analysis', protect, analysisRouter);
-app.use('/api/newchat', protect, newchats);
 
+app.use('/api/analysis', authMiddleware, analysisRouter);
+
+app.use('/api/ml', mlRoutes);
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'Backend running' });
 });
 
-// Error handler (MUST be last)
-app.use((err, req, res, next) => {
-  console.error('Error:', err.message);
-  res.status(500).json({ error: err.message });
-});
+// ============ ERROR HANDLER (MUST be LAST) ============
+app.use(errorHandler);
 
-// Start Server
+
+
+
+// ============ START SERVER ============
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
