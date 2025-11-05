@@ -3,7 +3,8 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const FormData = require('form-data');
-const { connectDB,supabaseAdmin } = require('../config/supabase');
+const AdmZip = require('adm-zip');
+const { supabaseAdmin } = require('../config/supabase');
 const authMiddleware = require('../middleware/auth');
 
 const ML_API_URL = process.env.ML_API_URL || 'http://localhost:8000';
@@ -41,12 +42,13 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
 
     console.log(`✅ Found analysis`);
 
-    // Update status
-    await supabaseAdmin
+    // Update status to processing
+    const { error: statusError1 } = await supabaseAdmin
       .from('analyses')
       .update({ status: 'processing' })
       .eq('id', analysisId);
 
+    if (statusError1) console.warn('⚠️ Status update warning:', statusError1.message);
     console.log(`⏳ Status: processing`);
 
     // Download video
@@ -101,20 +103,31 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
     const videoId = mlResponse.headers['x-video-id'] || '';
     const isDeepfake = confidenceScore >= 0.5;
 
-    // Extract frame-wise confidences
+    // Extract frame-wise confidences from ZIP
     let frameWiseConfidences = [];
-    if (mlResponse.headers['x-frame-confidences']) {
-      try {
-        frameWiseConfidences = JSON.parse(mlResponse.headers['x-frame-confidences']);
-        console.log(`✅ Frame-wise confidences: ${frameWiseConfidences.length} frames`);
-      } catch (e) {
-        console.warn('Could not parse frame confidences');
-      }
+    try {
+      const zipBuffer = mlResponse.data;
+      const zip = new AdmZip(zipBuffer);
+      const zipEntries = zip.getEntries();
+
+      console.log(`📦 ZIP contains ${zipEntries.length} files`);
+
+      zipEntries.forEach(entry => {
+        if (entry.entryName.endsWith('.json')) {
+          const jsonContent = entry.getData().toString('utf8');
+          const analysisData = JSON.parse(jsonContent);
+          frameWiseConfidences = analysisData.frame_wise_confidences || [];
+          console.log(`✅ Extracted ${frameWiseConfidences.length} frame confidences from ZIP`);
+        }
+      });
+    } catch (zipError) {
+      console.warn('⚠️ Could not extract ZIP JSON:', zipError.message);
+      frameWiseConfidences = [];
     }
 
     console.log(`✅ Extracted ML data:`, { is_deepfake: isDeepfake, confidence_score: confidenceScore });
 
-    // ✅ CREATE JSON REPORT
+    // Create JSON report
     console.log(`\n📋 CREATING REPORT:`);
     const report = {
       analysis_id: analysisId,
@@ -131,7 +144,7 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
       status: 'completed'
     };
 
-    // ✅ Save ZIP as is (NOT modifying it)
+    // Save ZIP file
     const zipBuffer = mlResponse.data;
     const zipPath = `${userId}/${analysisId}/annotated_frames.zip`;
 
@@ -150,7 +163,8 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
       console.error(`⚠️ Warning: Could not save ZIP:`, zipError.message);
     }
 
-    // ✅ Save to database
+    // ✅ FIXED: Save to database WITHOUT .catch()
+    console.log(`\n📊 SAVING TO DATABASE:`);
     const { error: updateError } = await supabaseAdmin
       .from('analyses')
       .update({
@@ -164,8 +178,12 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
       .eq('id', analysisId)
       .eq('user_id', userId);
 
-    if (updateError) throw updateError;
+    if (updateError) {
+      console.error('❌ Database update error:', updateError);
+      throw updateError;
+    }
 
+    console.log(`✅ Database updated\n`);
     console.log(`✅ Analysis COMPLETE\n`);
 
     res.json({ 
@@ -179,6 +197,7 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
         frames_analyzed: framesAnalyzed,
         total_frames: analysis.total_frames || total_frames || 0,
         frame_wise_confidences: frameWiseConfidences,
+        zip_file_size: zipBuffer.length,
         filename: analysis.filename,
         annotated_frames_path: zipPath,
         created_at: new Date().toISOString()
@@ -187,16 +206,34 @@ router.post('/:analysisId', authMiddleware, async (req, res) => {
 
   } catch (error) {
     console.error(`\n❌ ERROR: ${error.message}\n`);
+    console.error(`❌ Full error:`, error);
 
     if (error.response) {
       console.error(`❌ FastAPI Error Status: ${error.response.status}`);
+      console.error(`❌ FastAPI Error Data:`, error.response.data);
     }
 
-    await supabaseAdmin
-      .from('analyses')
-      .update({ status: 'failed', error_message: error.message })
-      .eq('id', req.params.analysisId)
-      .catch(err => console.error('Failed to update status:', err));
+    if (error.code === 'ECONNREFUSED') {
+      console.error('❌ ECONNREFUSED: FastAPI not running at:', ML_API_URL);
+      return res.status(503).json({ 
+        success: false, 
+        message: 'ML service unavailable',
+        debug: ML_API_URL
+      });
+    }
+
+    // ✅ FIXED: Update failed status WITHOUT .catch()
+    try {
+      await supabaseAdmin
+        .from('analyses')
+        .update({ 
+          status: 'failed', 
+          error_message: error.message 
+        })
+        .eq('id', req.params.analysisId);
+    } catch (updateErr) {
+      console.error('Failed to update failed status:', updateErr.message);
+    }
 
     res.status(500).json({ success: false, message: error.message });
   }
