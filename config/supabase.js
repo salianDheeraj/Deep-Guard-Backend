@@ -5,7 +5,10 @@ require('dotenv').config();
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
   console.warn('⚠️ WARNING: Missing Supabase credentials - auth will not work');
 }
-
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SERVICE_ROLE_KEY
+);
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
@@ -30,4 +33,5 @@ const connectDB = async () => {
   }
 };
 
-module.exports = { supabase, connectDB };
+
+module.exports = { supabase, supabaseAdmin, connectDB };

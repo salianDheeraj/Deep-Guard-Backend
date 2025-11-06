@@ -2,12 +2,19 @@ const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
 const path = require('path');
-const { protect } = require('./middleware/auth');
+const authMiddleware = require('./middleware/auth');
+const logger = require('./middleware/logger');
+const errorHandler = require('./middleware/errorHandler');
+const mlServices = require('./routes/ml-service');
+const { connectDB,supabaseAdmin } = require('./config/supabase');
+
+const userRoutes = require('./routes/userRoutes');
+const analysisRouter = require('./routes/analysis');
 
 // Load env vars
 dotenv.config();
 
-// Import routes with error handling
+// Import auth routes
 let authRoutes;
 try {
   authRoutes = require('./routes/auth');
@@ -16,52 +23,49 @@ try {
   console.error('❌ Auth routes error:', err.message);
 }
 
-const userRoutes = require('./routes/userRoutes');
-const analysisRouter = require('./routes/analysis');
-const newchats = require('./routes/newchat');
-
-// Import DB connection
-const { connectDB } = require('./config/supabase');
-
-// Try connecting
-connectDB().catch(err => console.log('DB connection warning:', err));
+// Connect to Supabase
+connectDB()
+  .then(() => console.log('✅ Database connected'))
+  .catch(err => console.error('❌ DB connection failed:', err.message));
 
 const app = express();
 
-// Middleware (BEFORE routes)
+// ============ MIDDLEWARE ============
+app.use(logger);
 app.use(cors({
   origin: 'http://localhost:3000', 
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Routes
+// ============ ROUTES ============
+
+// Auth (no auth needed)
 if (authRoutes) {
-  app.use('/auth', authRoutes); // No protect middleware here
+  app.use('/auth', authRoutes);
 } else {
   console.error('⚠️ Auth routes not loaded!');
 }
 
-// Protected routes
-app.use('/api/users', protect, userRoutes);
-app.use('/api/analysis', protect, analysisRouter);
-app.use('/api/newchat', protect, newchats);
+// Analysis upload (protected)
+app.use('/api/analysis', authMiddleware, analysisRouter);
+
+// ✅ ML routes (protected) - ONLY ONE!
+app.use('/api/ml/analyze',authMiddleware, mlServices);
+  // ✅ CORRECT - no middleware here
+
 
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'Backend running' });
 });
 
-// Error handler (MUST be last)
-app.use((err, req, res, next) => {
-  console.error('Error:', err.message);
-  res.status(500).json({ error: err.message });
-});
+// ============ ERROR HANDLER ============
+app.use(errorHandler);
 
-// Start Server
+// ============ START SERVER ============
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
