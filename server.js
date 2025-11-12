@@ -7,6 +7,8 @@ const logger = require('./middleware/logger');
 const errorHandler = require('./middleware/errorHandler');
 const mlServices = require('./routes/ml-service');
 const { connectDB,supabaseAdmin } = require('./config/supabase');
+const updateProdile=require('./routes/update_profile')
+
 
 const userRoutes = require('./routes/userRoutes');
 const analysisRouter = require('./routes/analysis');
@@ -48,13 +50,14 @@ if (authRoutes) {
 } else {
   console.error('⚠️ Auth routes not loaded!');
 }
-
+app.use('/api/update-profile',authMiddleware,updateProdile)
 // Analysis upload (protected)
 app.use('/api/analysis', authMiddleware, analysisRouter);
 
 // ✅ ML routes (protected) - ONLY ONE!
 app.use('/api/ml/analyze',authMiddleware, mlServices);
   // ✅ CORRECT - no middleware here
+
 
 
 // Health check
