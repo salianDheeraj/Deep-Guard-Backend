@@ -21,7 +21,6 @@ const uploadFile = async (req, res) => {
     console.log(`[Upload] User: ${userId}`);
     console.log(`[Upload] File: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`);
 
-    // Save metadata to database
     const { data, error } = await supabase
       .from('analyses')
       .insert({
@@ -112,19 +111,18 @@ const deleteAnalysis = async (req, res) => {
   }
 };
 
-// ===== VERIFY GOOGLE TOKEN =====
+// ------------------------------------------------------------
+// 🔥 UPDATE ONLY GOOGLE TOKEN LOGIC — NEW COOKIE SYSTEM
+// ------------------------------------------------------------
 const verifyGoogleToken = async (req, res) => {
   try {
-    // token from frontend
     const { credentials } = req.body;
 
-    // google authentication function
     const ticket = await client.verifyIdToken({
       idToken: credentials,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
 
-    // payload extracts the data
     const payload = ticket.getPayload();
     const { sub: googleId, email, name, picture } = payload;
 
@@ -166,12 +164,41 @@ const verifyGoogleToken = async (req, res) => {
       user = data;
     }
 
-    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET || 'secret', {
-      expiresIn: '30d',
+    // -------------------------------
+    // 🔥 NEW TOKEN SYSTEM (COOKIES)
+    // -------------------------------
+    const accessToken = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m" }
+    );
+
+    const refreshToken = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    // HttpOnly secure cookies
+    res.cookie("accessToken", accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 15 * 60 * 1000,
+      path: "/",
     });
 
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: "/",
+    });
+
+    // ✔ Do NOT return token to frontend
     return res.json({
-      token,
+      success: true,
       user: {
         id: user.id,
         name: user.name,
@@ -202,5 +229,12 @@ const getCurrentUser = async (req, res) => {
   }
 };
 
-// ✅ EXPORT ALL
-module.exports = { uploadFile, getAnalyses, getAnalysisById, deleteAnalysis, verifyGoogleToken, getCurrentUser };
+// EXPORT ALL
+module.exports = { 
+  uploadFile, 
+  getAnalyses, 
+  getAnalysisById, 
+  deleteAnalysis, 
+  verifyGoogleToken, 
+  getCurrentUser 
+};

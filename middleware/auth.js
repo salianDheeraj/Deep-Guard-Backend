@@ -1,52 +1,103 @@
-const jwt = require('jsonwebtoken');
-const { supabase,supabaseAdmin } = require('../config/supabase');
+const jwt = require("jsonwebtoken");
+const { supabase } = require("../config/supabase");
 
 const authMiddleware = async (req, res, next) => {
-  let token;
+  try {
+    const accessToken = req.cookies.accessToken;
+    const refreshToken = req.cookies.refreshToken;
 
-  // ✅ CHECK AUTHORIZATION HEADER
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    try {
-      // ✅ EXTRACT TOKEN
-      token = req.headers.authorization.split(' ')[1];
-      console.log('🔑 Token found, verifying...');
-
-      // ✅ VERIFY JWT
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-      console.log('✅ Token verified, userId:', decoded.userId || decoded.id);
-
-      // ✅ QUERY SUPABASE FOR USER
-      const { data: user, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', decoded.userId || decoded.id)  // Support both userId and id
-        .single();
-
-      if (error) {
-        console.error('❌ Supabase error:', error.message);
-        return res.status(401).json({ message: 'User query failed' });
-      }
-
-      if (!user) {
-        console.error('❌ User not found in database');
-        return res.status(401).json({ message: 'User not found' });
-      }
-
-      // ✅ ATTACH USER TO REQUEST
-      req.user = user;
-      console.log('✅ Auth successful, user:', user.email);
-      next();
-
-    } catch (error) {
-      console.error('❌ Auth error:', error.message);
-      return res.status(401).json({ 
-        message: 'Not authorized, token failed',
-        error: error.message 
-      });
+    // -------------------------------------------------------------
+    // 1) No token at all → reject
+    // -------------------------------------------------------------
+    if (!accessToken && !refreshToken) {
+      return res.status(401).json({ message: "Not authorized, no token provided" });
     }
-  } else {
-    console.error('❌ No Bearer token in headers');
-    return res.status(401).json({ message: 'Not authorized, no token' });
+
+    let decoded = null;
+
+    // -------------------------------------------------------------
+    // 2) Try ACCESS TOKEN first
+    // -------------------------------------------------------------
+    if (accessToken) {
+      try {
+        decoded = jwt.verify(accessToken, process.env.JWT_SECRET);
+        console.log("🔐 Access token valid");
+      } catch (err) {
+        console.log("⚠️ Access token expired:", err.message);
+      }
+    }
+
+    // -------------------------------------------------------------
+    // 3) If access token invalid → try REFRESH TOKEN
+    // -------------------------------------------------------------
+    if (!decoded && refreshToken) {
+      try {
+        const refreshDecoded = jwt.verify(
+          refreshToken,
+          process.env.JWT_REFRESH_SECRET
+        );
+
+        console.log("🔁 Refresh token valid → issuing new access token…");
+
+        // Issue a NEW 15-min access token
+        const newAccessToken = jwt.sign(
+          { userId: refreshDecoded.userId, email: refreshDecoded.email },
+          process.env.JWT_SECRET,
+          { expiresIn: "15m" }
+        );
+
+        // Set in cookie
+        res.cookie("accessToken", newAccessToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "strict",
+          maxAge: 15 * 60 * 1000,
+          path: "/",
+        });
+
+        decoded = refreshDecoded; // Treat refresh as valid session
+      } catch (err) {
+        console.log("❌ Refresh token invalid:", err.message);
+
+        return res.status(401).json({
+          message: "Session expired, please login again",
+        });
+      }
+    }
+
+    // -------------------------------------------------------------
+    // 4) If still no decoded token → unauthorized
+    // -------------------------------------------------------------
+    if (!decoded) {
+      return res.status(401).json({ message: "Not authorized" });
+    }
+
+    console.log("👤 Authenticated User ID:", decoded.userId);
+
+    // -------------------------------------------------------------
+    // 5) Fetch actual user from Supabase
+    // -------------------------------------------------------------
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", decoded.userId)
+      .single();
+
+    if (error || !user) {
+      console.error("❌ User not found in DB:", error?.message);
+      return res.status(401).json({ message: "User not found" });
+    }
+
+    // Attach full user object to req
+    req.user = user;
+
+    next();
+  } catch (err) {
+    console.error("❌ Middleware failure:", err.message);
+    return res.status(401).json({
+      message: "Not authorized",
+      error: err.message,
+    });
   }
 };
 

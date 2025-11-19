@@ -1,74 +1,70 @@
-const express = require('express');
-const dotenv = require('dotenv');
-const cors = require('cors');
-const path = require('path');
-const authMiddleware = require('./middleware/auth');
-const logger = require('./middleware/logger');
-const errorHandler = require('./middleware/errorHandler');
-const mlServices = require('./routes/ml-service');
-const { connectDB,supabaseAdmin } = require('./config/supabase');
-const updateProdile=require('./routes/update_profile')
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const path = require("path");
+const cookieParser = require("cookie-parser");
+const logger = require("./middleware/logger");
+const errorHandler = require("./middleware/errorHandler");
 
-
-const userRoutes = require('./routes/userRoutes');
-const analysisRouter = require('./routes/analysis');
-
-// Load env vars
 dotenv.config();
 
-// Import auth routes
-let authRoutes;
-try {
-  authRoutes = require('./routes/auth');
-  console.log('✅ Auth routes loaded');
-} catch (err) {
-  console.error('❌ Auth routes error:', err.message);
-}
-
-// Connect to Supabase
-connectDB()
-  .then(() => console.log('✅ Database connected'))
-  .catch(err => console.error('❌ DB connection failed:', err.message));
+/* ---------------------- ROUTES ---------------------- */
+const authRoutes = require("./routes/auth");              // ✔ Fixed
+const accountRoutes = require("./routes/update_profile");  // ✔ Fixed (update profile, change password, delete)
+const mlServices = require("./routes/ml-service");
+const analysisRouter = require("./routes/analysis");
+const mlServiceImagesRoutes = require('./routes/ml-service-images'); 
+/* ---------------------------------------------------- */
 
 const app = express();
 
-// ============ MIDDLEWARE ============
+/* ------------------ GLOBAL MIDDLEWARE ------------------ */
+
+
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    credentials: true,   // ✔ allows cookies
+  })
+);
 app.use(logger);
-app.use(cors({
-  origin: 'http://localhost:3000', 
+app.use(cookieParser());    // ✔ required for auth cookies
+app.use(express.json({
+    // Add a verify function to capture the raw body for debugging
+    verify: (req, res, buf) => {
+      
+        if (buf && buf.length) {
+            req.rawBody = buf.toString();
+        }
+    }
 }));
-
-app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, "public")));
 
-// ============ ROUTES ============
+/* ---------------------- ROUTES ---------------------- */
 
-// Auth (no auth needed)
-if (authRoutes) {
-  app.use('/auth', authRoutes);
-} else {
-  console.error('⚠️ Auth routes not loaded!');
-}
-app.use('/api/update-profile',authMiddleware,updateProdile)
-// Analysis upload (protected)
-app.use('/api/analysis', authMiddleware, analysisRouter);
+// AUTH (Login, Signup, Google Auth, Refresh, Me)
+app.use("/auth", authRoutes);              // ✔ main auth route
 
-// ✅ ML routes (protected) - ONLY ONE!
-app.use('/api/ml/analyze',authMiddleware, mlServices);
-  // ✅ CORRECT - no middleware here
+// ACCOUNT ROUTES (update profile, change password, delete)
+app.use("/api/account", accountRoutes);    // ✔ updated path
+
+// ANALYSIS ROUTES (upload + results)
+app.use("/api/analysis", analysisRouter);
+app.use('/ml-service-images', mlServiceImagesRoutes); // NEW
+// ML SERVICE ROUTE
+app.use("/api/ml/analyze", mlServices);
 
 
-
-// Health check
-app.get('/', (req, res) => {
-  res.json({ message: 'Backend running' });
+// SERVER HEALTH CHECK
+app.get("/", (req, res) => {
+  res.json({ status: "Backend running 🚀" });
 });
 
-// ============ ERROR HANDLER ============
+// ERROR HANDLER
 app.use(errorHandler);
 
-// ============ START SERVER ============
+/* --------------------- START SERVER --------------------- */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);

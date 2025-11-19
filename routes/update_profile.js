@@ -1,136 +1,245 @@
-const express = require('express');
-const { createClient } = require('@supabase/supabase-js');
-const authenticateToken = require('../middleware/authenticateToken');
+/**
+ *  AUTH ROUTES (Final Version)
+ *  Supports:
+ *   - Signup / Login
+ *   - Google OAuth Redirect + Callback
+ *   - Me (Get user)
+ *   - Update Profile
+ *   - Change Password
+ *   - Delete Analyses
+ *   - Delete Account
+ *   - Refresh Token
+ */
+
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { createClient } = require("@supabase/supabase-js");
+const requireAuth = require("../middleware/auth");
 
 const router = express.Router();
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SERVICE_ROLE_KEY);
 
-// GET /api/account - fetch current user profile
-router.get('/api/account', authenticateToken, async (req, res) => {
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SERVICE_ROLE_KEY
+);
+
+// ---------------- TOKEN HELPERS ---------------- //
+const createAccessToken = (userId) =>
+  jwt.sign({ userId }, process.env.JWT_SECRET, {
+    expiresIn: "15m",
+  });
+
+const createRefreshToken = (userId) =>
+  jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, {
+    expiresIn: "7d",
+  });
+
+const setCookies = (res, access, refresh) => {
+  res.cookie("accessToken", access, {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: false,
+    maxAge: 15 * 60 * 1000,
+    path: "/",
+  });
+
+  res.cookie("refreshToken", refresh, {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: false,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/",
+  });
+};
+
+// ---------------- FORMAT USER ---------------- //
+const cleanUser = (u) => ({
+  id: u.id,
+  name: u.name,
+  email: u.email,
+  profile_pic:
+    u.profile_pic ||
+    `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.email}`,
+});
+
+// Google OAuth has been removed. Only local signup/login remains.
+
+// ============================================================
+// SIGNUP
+// ============================================================
+router.post("/signup", async (req, res) => {
   try {
-    const userId = req.user.id;
+    const { email, password, name } = req.body;
 
-    const { data, error } = await supabase
-      .from('users')
-      .select('id, name, email, profile_pic')
-      .eq('id', userId)
+    const { data: exists } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
       .single();
 
-    if (error) {
-      console.error('Supabase fetch error:', error);
-      return res.status(500).json({ error: 'Failed to fetch user profile' });
+    if (exists) {
+      return res.status(400).json({ message: "User already exists" });
     }
 
-    res.status(200).json(data);
+    const hash = await bcrypt.hash(password, 10);
+
+    const { data, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        name,
+        password_hash: hash,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    const access = createAccessToken(data.id);
+    const refresh = createRefreshToken(data.id);
+
+    setCookies(res, access, refresh);
+
+    res.json({ user: cleanUser(data) });
   } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: err.message });
   }
 });
 
-// PUT /api/account - update current user profile
-router.put('/api/account', authenticateToken, async (req, res) => {
+// ============================================================
+// LOGIN
+// ============================================================
+router.post("/login", async (req, res) => {
   try {
-    const userId = req.user.id;
-    const { name, email, profile_pic } = req.body;
+    const { email, password } = req.body;
 
-    const { data, error } = await supabase
-      .from('users')
-      .update({ name, email, profile_pic })
-      .eq('id', userId)
+    const { data: user } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
       .single();
 
-    if (error) {
-      console.error('Supabase update error:', error);
-      return res.status(500).json({ error: 'Failed to update user profile' });
-    }
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
-    res.status(200).json({ message: 'Profile updated successfully', user: data });
+    if (!user.password_hash)
+      return res.status(401).json({ message: "Google account detected" });
+
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) return res.status(401).json({ message: "Invalid credentials" });
+
+    const access = createAccessToken(user.id);
+    const refresh = createRefreshToken(user.id);
+
+    setCookies(res, access, refresh);
+
+    res.json({ user: cleanUser(user) });
   } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: err.message });
   }
 });
 
-// POST /api/account/change-password - change user password
-router.post('/api/account/change-password', authenticateToken, async (req, res) => {
+// ============================================================
+// GET PROFILE
+// ============================================================
+router.get("/me", requireAuth, async (req, res) => {
+  res.json(cleanUser(req.user));
+});
+
+// ============================================================
+// UPDATE PROFILE
+// ============================================================
+router.put("/update-profile", requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const { name, profile_pic } = req.body;
+
+    const { data, error } = await supabase
+      .from("users")
+      .update({ name, profile_pic })
+      .eq("id", req.user.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ message: "Updated", user: cleanUser(data) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ============================================================
+// CHANGE PASSWORD
+// ============================================================
+router.post("/change-password", requireAuth, async (req, res) => {
+  try {
     const { current_password, new_password } = req.body;
 
-    // Verify current password
-    const { data: userData, error: userError } = await supabase
-      .from('users')
-      .select('password_hash')
-      .eq('id', userId)
-      .single();
+    const valid = await bcrypt.compare(
+      current_password,
+      req.user.password_hash
+    );
 
-    if (userError || !userData) {
-      return res.status(500).json({ error: 'Failed to verify user' });
+    if (!valid) {
+      return res.status(401).json({ message: "Incorrect password" });
     }
 
-    // TODO: Validate current_password (bcrypt etc.)
+    const hashed = await bcrypt.hash(new_password, 10);
 
-    // Update password (hash new_password before store)
-    const hashedPassword = new_password; // Replace with real hashing
+    await supabase
+      .from("users")
+      .update({ password_hash: hashed })
+      .eq("id", req.user.id);
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ password_hash: hashedPassword })
-      .eq('id', userId);
-
-    if (updateError) {
-      return res.status(500).json({ error: 'Failed to update password' });
-    }
-
-    res.status(200).json({ message: 'Password changed successfully' });
+    res.json({ message: "Password updated" });
   } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ message: err.message });
   }
 });
 
-// DELETE /api/account/delete-analyses - delete all user analyses
-router.delete('/api/account/delete-analyses', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const { error } = await supabase
-      .from('analyses')
-      .delete()
-      .eq('user_id', userId);
-
-    if (error) {
-      return res.status(500).json({ error: 'Failed to delete analyses' });
-    }
-
-    res.status(200).json({ message: 'All analyses deleted successfully' });
-  } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+// ============================================================
+// DELETE ANALYSES
+// ============================================================
+router.delete("/delete-analyses", requireAuth, async (req, res) => {
+  await supabase.from("analyses").delete().eq("user_id", req.user.id);
+  res.json({ message: "All analyses deleted" });
 });
 
-// DELETE /api/account/delete-account - delete user account and data
-router.delete('/api/account/delete-account', authenticateToken, async (req, res) => {
+// ============================================================
+// DELETE ACCOUNT
+// ============================================================
+router.delete("/delete-account", requireAuth, async (req, res) => {
+  await supabase.from("analyses").delete().eq("user_id", req.user.id);
+  await supabase.from("users").delete().eq("id", req.user.id);
+
+  res.clearCookie("accessToken", { path: "/" });
+  res.clearCookie("refreshToken", { path: "/" });
+
+  res.json({ message: "Account deleted" });
+});
+
+// ============================================================
+// REFRESH TOKEN
+// ============================================================
+router.post("/refresh", (req, res) => {
   try {
-    const userId = req.user.id;
+    const token = req.cookies.refreshToken;
+    if (!token) return res.status(401).json({ message: "No refresh token" });
 
-    await supabase.from('analyses').delete().eq('user_id', userId);
+    const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
 
-    const { error } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', userId);
+    const newAccess = createAccessToken(decoded.userId);
 
-    if (error) {
-      return res.status(500).json({ error: 'Failed to delete account' });
-    }
+    res.cookie("accessToken", newAccess, {
+      httpOnly: true,
+      sameSite: "strict",
+      secure: false,
+      maxAge: 15 * 60 * 1000,
+    });
 
-    res.status(200).json({ message: 'Account deleted successfully' });
+    res.json({ message: "Refreshed" });
   } catch (err) {
-    console.error('Unexpected error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(401).json({ message: "Invalid refresh token" });
   }
 });
 
