@@ -14,7 +14,6 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { google } = require("googleapis");
 const { createClient } = require("@supabase/supabase-js");
 const requireAuth = require("../middleware/auth");
 
@@ -64,82 +63,7 @@ const cleanUser = (u) => ({
     `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.email}`,
 });
 
-// ============================================================
-// GOOGLE OAUTH REDIRECT
-// ============================================================
-router.get("/google", (req, res) => {
-  const oauth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    `${process.env.SERVER_URL}/auth/google/callback`
-  );
-
-  const url = oauth.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: ["profile", "email"],
-  });
-
-  return res.redirect(url);
-});
-
-// ============================================================
-// GOOGLE OAUTH CALLBACK
-// ============================================================
-router.get("/google/callback", async (req, res) => {
-  try {
-    const code = req.query.code;
-
-    const oauth = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      `${process.env.SERVER_URL}/auth/google/callback`
-    );
-
-    const { tokens } = await oauth.getToken(code);
-    oauth.setCredentials(tokens);
-
-    const oauth2 = google.oauth2("v2");
-    const { data: profile } = await oauth2.userinfo.get({ auth: oauth });
-
-    const { id: googleId, email, name, picture } = profile;
-
-    // Check if user exists
-    const { data: existing } = await supabase
-      .from("users")
-      .select("*")
-      .eq("google_id", googleId)
-      .single();
-
-    let user;
-    if (!existing) {
-      const { data, error } = await supabase
-        .from("users")
-        .insert({
-          google_id: googleId,
-          email,
-          name,
-          profile_pic: picture,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-      user = data;
-    } else {
-      user = existing;
-    }
-
-    const access = createAccessToken(user.id);
-    const refresh = createRefreshToken(user.id);
-
-    setCookies(res, access, refresh);
-
-    return res.redirect(`${process.env.CLIENT_URL}/dashboard`);
-  } catch (err) {
-    console.error("GOOGLE CALLBACK ERROR:", err.message);
-    return res.redirect(`${process.env.CLIENT_URL}/login?error=google`);
-  }
-});
+// Google OAuth has been removed. Only local signup/login remains.
 
 // ============================================================
 // SIGNUP
