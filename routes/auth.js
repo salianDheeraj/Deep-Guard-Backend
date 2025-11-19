@@ -3,6 +3,7 @@ const authController = require("../controllers/authcontroller");
 const authMiddleware = require("../middleware/auth");
 const router = express.Router();
 
+router.post("/signup/send-otp", authController.sendSignupOtp);
 router.post("/signup", authController.signup);
 router.post("/login", authController.login);
 router.post("/google", authController.googleLogin);

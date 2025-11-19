@@ -6,6 +6,10 @@ const nodemailer = require("nodemailer");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+const signupOtpStore = new Map();
+const SIGNUP_OTP_EXPIRY_MS = 5 * 60 * 1000;
+const SIGNUP_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+
 const createAccessToken = (userId, email) =>
   jwt.sign({ userId, email }, process.env.JWT_SECRET, { expiresIn: "15m" });
 
@@ -38,16 +42,107 @@ const formatUser = (user) => ({
     `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.email}`,
 });
 
-exports.signup = async (req, res) => {
+const createEmailTransporter = () =>
+  nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASSWORD,
+    },
+    socketTimeout: 10000,
+  });
+
+exports.sendSignupOtp = async (req, res) => {
   try {
-    const { email, password, name } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ message: "Email and password required" });
+    const { email, name } = req.body || {};
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
 
     const { data: existing } = await supabase
       .from("users")
       .select("id")
-      .eq("email", email)
+      .eq("email", normalizedEmail)
+      .single();
+
+    if (existing) {
+      return res.status(400).json({ message: "User already exists" });
+    }
+
+    const now = Date.now();
+    const existingOtp = signupOtpStore.get(normalizedEmail);
+    if (existingOtp && now - existingOtp.lastSentAt < SIGNUP_OTP_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil(
+        (SIGNUP_OTP_RESEND_COOLDOWN_MS - (now - existingOtp.lastSentAt)) / 1000,
+      );
+      return res
+        .status(429)
+        .json({ message: `Please wait ${wait}s before requesting another OTP.` });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await bcrypt.hash(otp, 10);
+
+    signupOtpStore.set(normalizedEmail, {
+      hashedOtp,
+      expiresAt: now + SIGNUP_OTP_EXPIRY_MS,
+      lastSentAt: now,
+    });
+
+    const transporter = createEmailTransporter();
+
+    await transporter.sendMail({
+      from: `"Deep Guard" <${process.env.EMAIL_USER}>`,
+      to: normalizedEmail,
+      subject: "Verify your Deep Guard account",
+      html: `
+        <h2>Welcome to Deep Guard</h2>
+        <p>Hi ${name || "there"},</p>
+        <p>Your verification code is:</p>
+        <h1 style="color: #4F46E5; font-size: 32px; letter-spacing: 5px;">${otp}</h1>
+        <p>This code expires in 5 minutes.</p>
+      `,
+    });
+
+    res.json({ success: true, message: "OTP sent to your email" });
+  } catch (err) {
+    console.error("Send Signup OTP Error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.signup = async (req, res) => {
+  try {
+    const { email, password, name, otp } = req.body;
+    if (!email || !password || !otp)
+      return res
+        .status(400)
+        .json({ message: "Email, password, and OTP are required" });
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const otpEntry = signupOtpStore.get(normalizedEmail);
+    if (!otpEntry) {
+      return res.status(400).json({ message: "OTP not requested or expired" });
+    }
+
+    if (Date.now() > otpEntry.expiresAt) {
+      signupOtpStore.delete(normalizedEmail);
+      return res.status(400).json({ message: "OTP has expired. Request a new one." });
+    }
+
+    const isOtpValid = await bcrypt.compare(otp, otpEntry.hashedOtp);
+    if (!isOtpValid) {
+      return res.status(400).json({ message: "Invalid OTP" });
+    }
+
+    const { data: existing } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", normalizedEmail)
       .single();
 
     if (existing)
@@ -58,12 +153,14 @@ exports.signup = async (req, res) => {
     const { data: user, error } = await supabase
       .from("users")
       .insert({
-        email,
+        email: normalizedEmail,
         name: name || email.split("@")[0],
         password_hash: hash,
       })
       .select()
       .single();
+
+    signupOtpStore.delete(normalizedEmail);
 
     if (error) throw error;
 
