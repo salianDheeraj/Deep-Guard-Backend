@@ -5,7 +5,7 @@ const path = require("path");
 const cookieParser = require("cookie-parser");
 const logger = require("./middleware/logger");
 const errorHandler = require("./middleware/errorHandler");
-
+const authMiddleware=require("./middleware/auth")
 dotenv.config();
 
 /* ---------------------- ROUTES ---------------------- */
@@ -47,13 +47,13 @@ app.use(express.static(path.join(__dirname, "public")));
 app.use("/auth", authRoutes);              // ✔ main auth route
 
 // ACCOUNT ROUTES (update profile, change password, delete)
-app.use("/api/account", accountRoutes);    // ✔ updated path
+app.use("/api/account",authMiddleware, accountRoutes);    // ✔ updated path
 
 // ANALYSIS ROUTES (upload + results)
-app.use("/api/analysis", analysisRouter);
-app.use('/ml-service-images', mlServiceImagesRoutes); // NEW
+app.use("/api/analysis",authMiddleware, analysisRouter);
+app.use('/ml-service-images',authMiddleware, mlServiceImagesRoutes); // NEW
 // ML SERVICE ROUTE
-app.use("/api/ml/analyze", mlServices);
+app.use("/api/ml/analyze",authMiddleware, mlServices);
 
 
 // SERVER HEALTH CHECK

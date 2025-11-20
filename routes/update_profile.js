@@ -128,43 +128,45 @@ router.delete("/delete-analyses", requireAuth, async (req, res) => {
 // -------------------------------
 // LOGOUT OTHER DEVICES (but keep current device)
 // -------------------------------
-router.post("/logout-other-devices", requireAuth, async (req, res) => {
+// ------------------------------------
+// LOGOUT ALL DEVICES (invalidate everyone, including this browser)
+// ------------------------------------
+router.post("/logout-all", requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Increase version → kills all sessions globally
-    const { data: updated, error } = await supabase
+    // 1. Increase token_version → invalidates ALL existing JWTs
+    const { data: updated, error: versionError } = await supabase
       .from("users")
       .update({ token_version: req.user.tokenVersion + 1 })
       .eq("id", userId)
       .select("token_version")
       .single();
 
-    if (error) throw error;
+    if (versionError) throw versionError;
 
-    // Delete all sessions for this user EXCEPT the current one
-    // Identify current session:
-    const currentRefresh = req.cookies.refreshToken;
-    const currentHash = crypto
-      .createHash("sha256")
-      .update(currentRefresh)
-      .digest("hex");
-
-    await supabase
+    // 2. Remove ALL sessions from DB
+    const { error: sessionError } = await supabase
       .from("sessions")
       .delete()
-      .eq("user_id", userId)
-      .neq("refresh_token_hash", currentHash);
+      .eq("user_id", userId);
+
+    if (sessionError) throw sessionError;
+
+    // 3. Clear cookies from current device
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
 
     return res.json({
       success: true,
-      message: "Logged out from all other devices",
+      message: "Logged out from all devices",
     });
   } catch (err) {
-    console.error("Logout-other-devices Error:", err);
-    return res.status(500).json({ message: "Internal error" });
+    console.error("Logout-All Error:", err);
+    res.status(500).json({ message: "Internal error" });
   }
 });
+
 
 router.delete("/delete-account", requireAuth, async (req, res) => {
   try {
