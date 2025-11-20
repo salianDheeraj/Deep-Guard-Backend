@@ -1,38 +1,74 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 const { OAuth2Client } = require("google-auth-library");
 const { supabase } = require("../config/supabase");
-const nodemailer = require("nodemailer");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-const signupOtpStore = new Map();
-const SIGNUP_OTP_EXPIRY_MS = 5 * 60 * 1000;
-const SIGNUP_OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+// -------------------------------
+// TOKEN + SESSION HELPERS
+// -------------------------------
+const hashToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
 
-const createAccessToken = (userId, email) =>
-  jwt.sign({ userId, email }, process.env.JWT_SECRET, { expiresIn: "15m" });
+const createAccessToken = (userId, email, tokenVersion) =>
+  jwt.sign(
+    { userId, email, tokenVersion },
+    process.env.JWT_SECRET,
+    { expiresIn: "15m" }
+  );
 
-const createRefreshToken = (userId, email) =>
-  jwt.sign({ userId, email }, process.env.JWT_REFRESH_SECRET, { expiresIn: "7d" });
+const createRefreshToken = (userId, email, tokenVersion) =>
+  jwt.sign(
+    { userId, email, tokenVersion },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: "30d" }
+  );
 
-const setAuthCookies = (res, accessToken, refreshToken) => {
-  res.cookie("accessToken", accessToken, {
+const setAuthCookies = (res, access, refresh) => {
+  res.cookie("accessToken", access, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     maxAge: 15 * 60 * 1000,
     path: "/",
   });
-  res.cookie("refreshToken", refreshToken, {
+
+  res.cookie("refreshToken", refresh, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge: 30 * 24 * 60 * 60 * 1000,
     path: "/",
   });
 };
 
+const createSession = async (req, user, refreshToken) => {
+  const hashedRT = hashToken(refreshToken);
+
+  await supabase.from("sessions").insert({
+    user_id: user.id,
+    refresh_token_hash: hashedRT,
+    token_version_snapshot: user.token_version,
+    user_agent: req.headers["user-agent"],
+    ip_address: req.ip,
+    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  });
+};
+
+// -------------------------------
+// EMAIL HELPERS
+// -------------------------------
+const mailer = nodemailer.createTransport({
+  service: "gmail",
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASSWORD },
+});
+
+// -------------------------------
+// FORMAT USER
+// -------------------------------
 const formatUser = (user) => ({
   id: user.id,
   name: user.name,
@@ -42,172 +78,143 @@ const formatUser = (user) => ({
     `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.email}`,
 });
 
-const createEmailTransporter = () =>
-  nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASSWORD,
-    },
-    socketTimeout: 10000,
-  });
+// -------------------------------
+// OTP STORE (Signup Only)
+// -------------------------------
+const signupOtpStore = new Map();
+const SIGNUP_OTP_EXPIRY_MS = 5 * 60 * 1000;
 
+// -------------------------------
+// SEND SIGNUP OTP
+// -------------------------------
 exports.sendSignupOtp = async (req, res) => {
   try {
-    const { email, name } = req.body || {};
+    const { email, name } = req.body;
+    if (!email) return res.status(400).json({ message: "Email required" });
 
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" });
-    }
+    const normalized = email.toLowerCase().trim();
 
-    const normalizedEmail = email.trim().toLowerCase();
-
-    const { data: existing } = await supabase
+    const { data: exists } = await supabase
       .from("users")
       .select("id")
-      .eq("email", normalizedEmail)
+      .eq("email", normalized)
       .single();
 
-    if (existing) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-
-    const now = Date.now();
-    const existingOtp = signupOtpStore.get(normalizedEmail);
-    if (existingOtp && now - existingOtp.lastSentAt < SIGNUP_OTP_RESEND_COOLDOWN_MS) {
-      const wait = Math.ceil(
-        (SIGNUP_OTP_RESEND_COOLDOWN_MS - (now - existingOtp.lastSentAt)) / 1000,
-      );
-      return res
-        .status(429)
-        .json({ message: `Please wait ${wait}s before requesting another OTP.` });
-    }
+    if (exists) return res.status(400).json({ message: "User already exists" });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const hashedOtp = await bcrypt.hash(otp, 10);
+    const hashed = await bcrypt.hash(otp, 10);
 
-    signupOtpStore.set(normalizedEmail, {
-      hashedOtp,
-      expiresAt: now + SIGNUP_OTP_EXPIRY_MS,
-      lastSentAt: now,
+    signupOtpStore.set(normalized, {
+      hashedOtp: hashed,
+      expiresAt: Date.now() + SIGNUP_OTP_EXPIRY_MS,
+      name,
     });
 
-    const transporter = createEmailTransporter();
-
-    await transporter.sendMail({
+    await mailer.sendMail({
       from: `"Deep Guard" <${process.env.EMAIL_USER}>`,
-      to: normalizedEmail,
+      to: normalized,
       subject: "Verify your Deep Guard account",
-      html: `
-        <h2>Welcome to Deep Guard</h2>
-        <p>Hi ${name || "there"},</p>
-        <p>Your verification code is:</p>
-        <h1 style="color: #4F46E5; font-size: 32px; letter-spacing: 5px;">${otp}</h1>
-        <p>This code expires in 5 minutes.</p>
-      `,
+      html: `<h1>${otp}</h1>`,
     });
 
-    res.json({ success: true, message: "OTP sent to your email" });
+    res.json({ success: true });
   } catch (err) {
-    console.error("Send Signup OTP Error:", err);
-    res.status(500).json({ message: err.message });
+    console.error("OTP error:", err);
+    res.status(500).json({ message: "Failed to send OTP" });
   }
 };
 
+// -------------------------------
+// SIGNUP
+// -------------------------------
 exports.signup = async (req, res) => {
   try {
     const { email, password, name, otp } = req.body;
-    if (!email || !password || !otp)
-      return res
-        .status(400)
-        .json({ message: "Email, password, and OTP are required" });
+    const normalized = email.toLowerCase().trim();
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const entry = signupOtpStore.get(normalized);
+    if (!entry) return res.status(400).json({ message: "OTP not requested" });
 
-    const otpEntry = signupOtpStore.get(normalizedEmail);
-    if (!otpEntry) {
-      return res.status(400).json({ message: "OTP not requested or expired" });
+    if (Date.now() > entry.expiresAt) {
+      signupOtpStore.delete(normalized);
+      return res.status(400).json({ message: "OTP expired" });
     }
 
-    if (Date.now() > otpEntry.expiresAt) {
-      signupOtpStore.delete(normalizedEmail);
-      return res.status(400).json({ message: "OTP has expired. Request a new one." });
-    }
-
-    const isOtpValid = await bcrypt.compare(otp, otpEntry.hashedOtp);
-    if (!isOtpValid) {
-      return res.status(400).json({ message: "Invalid OTP" });
-    }
-
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", normalizedEmail)
-      .single();
-
-    if (existing)
-      return res.status(400).json({ message: "User already exists" });
+    const validOtp = await bcrypt.compare(otp, entry.hashedOtp);
+    if (!validOtp) return res.status(400).json({ message: "Invalid OTP" });
 
     const hash = await bcrypt.hash(password, 10);
 
     const { data: user, error } = await supabase
       .from("users")
       .insert({
-        email: normalizedEmail,
-        name: name || email.split("@")[0],
+        email: normalized,
+        name: name || normalized.split("@")[0],
         password_hash: hash,
+        token_version: 1,
       })
       .select()
       .single();
 
-    signupOtpStore.delete(normalizedEmail);
-
     if (error) throw error;
 
-    const access = createAccessToken(user.id, user.email);
-    const refresh = createRefreshToken(user.id, user.email);
+    signupOtpStore.delete(normalized);
+
+    const access = createAccessToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+
+    await createSession(req, user, refresh);
+
     setAuthCookies(res, access, refresh);
 
     res.status(201).json({ user: formatUser(user) });
   } catch (err) {
     console.error("Signup Error:", err);
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ message: "Internal error" });
   }
 };
 
+// -------------------------------
+// LOGIN
+// -------------------------------
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
+    const normalized = email.toLowerCase().trim();
 
     const { data: user } = await supabase
       .from("users")
       .select("*")
-      .eq("email", email)
+      .eq("email", normalized)
       .single();
 
     if (!user || !user.password_hash)
       return res.status(401).json({ message: "Invalid credentials" });
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid)
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (!valid) return res.status(401).json({ message: "Invalid credentials" });
 
-    const access = createAccessToken(user.id, user.email);
-    const refresh = createRefreshToken(user.id, user.email);
+    const access = createAccessToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+
+    await createSession(req, user, refresh);
+
     setAuthCookies(res, access, refresh);
 
     res.json({ user: formatUser(user) });
   } catch (err) {
-    console.error("Login Error:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Login error:", err);
+    res.status(500).json({ message: "Internal error" });
   }
 };
 
+// -------------------------------
+// GOOGLE LOGIN
+// -------------------------------
 exports.googleLogin = async (req, res) => {
   try {
     const { credentials } = req.body;
-    if (!credentials)
-      return res.status(400).json({ message: "Google token required" });
 
     const ticket = await googleClient.verifyIdToken({
       idToken: credentials,
@@ -217,33 +224,32 @@ exports.googleLogin = async (req, res) => {
     const payload = ticket.getPayload();
     const { sub: googleId, email, name, picture } = payload;
 
-    const { data: existing } = await supabase
+    let { data: user } = await supabase
       .from("users")
       .select("*")
       .eq("google_id", googleId)
       .single();
 
-    let user = existing;
-
-    if (!existing) {
-      const { data: newUser, error } = await supabase
+    if (!user) {
+      const insert = await supabase
         .from("users")
         .insert({
           google_id: googleId,
           email,
           name,
           profile_picture: picture,
+          token_version: 1,
         })
         .select()
         .single();
 
-      if (error) throw error;
-
-      user = newUser;
+      user = insert.data;
     }
 
-    const access = createAccessToken(user.id, user.email);
-    const refresh = createRefreshToken(user.id, user.email);
+    const access = createAccessToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+
+    await createSession(req, user, refresh);
     setAuthCookies(res, access, refresh);
 
     res.json({ user: formatUser(user) });
@@ -253,200 +259,77 @@ exports.googleLogin = async (req, res) => {
   }
 };
 
+// -------------------------------
+// REFRESH ENDPOINT DISABLED
+// -------------------------------
 exports.refresh = (req, res) => {
+  return res.status(400).json({
+    message: "Refresh handled automatically by middleware",
+  });
+};
+
+// -------------------------------
+// GET ME
+// -------------------------------
+exports.getMe = (req, res) => {
+  return res.json(formatUser(req.user));
+};
+
+// -------------------------------
+// LOGOUT (current session only)
+// -------------------------------
+exports.logout = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
-    if (!refreshToken)
-      return res.status(401).json({ message: "Missing refresh token" });
 
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    if (refreshToken) {
+      const hashedRT = hashToken(refreshToken);
+      await supabase
+        .from("sessions")
+        .delete()
+        .eq("refresh_token_hash", hashedRT);
+    }
 
-    const newAccess = createAccessToken(decoded.userId, decoded.email);
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
 
-    res.cookie("accessToken", newAccess, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 15 * 60 * 1000,
-    });
-
-    res.json({ message: "Access token refreshed" });
+    return res.json({ success: true, message: "Logged out successfully" });
   } catch (err) {
-    console.error("Refresh Error:", err);
-    res.status(401).json({ message: "Invalid refresh token" });
+    console.error("Logout Error:", err);
+    res.status(500).json({ message: "Internal error" });
   }
 };
 
-exports.getMe = async (req, res) => {
+// -------------------------------
+// LOGOUT ALL DEVICES
+// -------------------------------
+exports.logoutAllDevices = async (req, res) => {
   try {
-    res.json(formatUser(req.user));
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-};
-exports.sendResetOtp = async (req, res) => {
-  try {
-    let email;
+    const userId = req.user.id;
 
-    if (!req.body || Object.keys(req.body).length === 0) {
-      if (req.rawBody) {
-        try {
-          const parsedRaw = JSON.parse(req.rawBody);
-          email = parsedRaw.email;
-        } catch (err) {
-          return res.status(400).json({ message: "Invalid JSON format received." });
-        }
-      }
-    } else {
-      email = req.body.email;
-    }
-
-    if (!email) {
-      return res.status(400).json({ message: "Email is required" });
-    }
-
-    const { data: user, error: userError } = await supabase
+    const { data: updated, error } = await supabase
       .from("users")
-      .select("id, email, name, password_hash, reset_otp_sent_at")
-      .eq("email", email)
+      .update({ token_version: req.user.tokenVersion + 1 })
+      .eq("id", userId)
+      .select("token_version")
       .single();
 
-    // Avoid email enumeration
-    if (userError || !user) {
-      return res.json({ success: true, message: "If the account exists, a reset code has been sent." });
-    }
+    if (error) throw error;
 
-    if (!user.password_hash) {
-      return res.json({ success: true, message: "If the account exists, a reset code has been sent." });
-    }
+    await supabase
+      .from("sessions")
+      .delete()
+      .eq("user_id", userId);
 
-    // ============================
-    //  RESEND COOLDOWN — 60 sec
-    // ============================
-    const now = Date.now();
-    if (user.reset_otp_sent_at) {
-      const lastSent = new Date(user.reset_otp_sent_at).getTime();
-      if (now - lastSent < 60 * 1000) {
-        const wait = Math.ceil((60 * 1000 - (now - lastSent)) / 1000);
-        return res.status(429).json({
-          message: `Please wait ${wait}s before requesting another OTP.`,
-        });
-      }
-    }
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
 
-    // Generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Hash OTP BEFORE saving
-    const hashedOtp = await bcrypt.hash(otp, 10);
-
-    // 2-minute expiry
-    const otpExpiry = new Date(now + 2 * 60 * 1000);
-
-    // Update DB
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({
-        reset_otp: hashedOtp,
-        reset_otp_expiry: otpExpiry.toISOString(),
-        reset_otp_sent_at: new Date().toISOString()
-      })
-      .eq("id", user.id);
-
-    if (updateError) throw updateError;
-
-    // Send Email
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD,
-      },
-      socketTimeout: 10000,
+    return res.json({
+      success: true,
+      message: "Logged out from all devices",
     });
-
-    const mailOptions = {
-      from: `"Deep Guard" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Password Reset OTP",
-      html: `
-        <h2>Password Reset Request</h2>
-        <p>Hi ${user.name || "User"},</p>
-        <p>Your OTP to reset your password is:</p>
-        <h1 style="color: #4F46E5; font-size: 32px; letter-spacing: 5px;">${otp}</h1>
-        <p>This OTP will expire in 2 minutes.</p>
-      `,
-    };
-
-    await transporter.sendMail(mailOptions);
-
-    res.json({ success: true, message: "OTP sent to your email" });
   } catch (err) {
-    console.error("Send Reset OTP Error:", err);
-    res.status(500).json({ message: err.message });
+    console.error("Logout-All Error:", err);
+    res.status(500).json({ message: "Internal error" });
   }
 };
-exports.resetPassword = async (req, res) => {
-  try {
-    const { email, otp, newPassword } = req.body;
-
-    if (!email || !otp || !newPassword) {
-      return res.status(400).json({
-        message: "Email, OTP, and new password are required",
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({
-        message: "Password must be at least 6 characters",
-      });
-    }
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, password_hash, reset_otp, reset_otp_expiry")
-      .eq("email", email)
-      .single();
-
-    if (error || !user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    if (!user.password_hash) {
-      return res.status(400).json({
-        message: "This account uses Google login. Password reset via OTP is not available.",
-      });
-    }
-
-    // Compare entered OTP with hashed OTP
-    const validOtp = await bcrypt.compare(otp, user.reset_otp);
-    if (!validOtp) {
-      return res.status(400).json({ message: "Invalid OTP" });
-    }
-
-    // Check expiry
-    if (new Date(user.reset_otp_expiry) < new Date()) {
-      return res.status(400).json({ message: "OTP has expired" });
-    }
-
-    // Update password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({
-        password_hash: hashedPassword,
-        reset_otp: null,
-        reset_otp_expiry: null,
-      })
-      .eq("id", user.id);
-
-    if (updateError) throw updateError;
-
-    res.json({ success: true, message: "Password reset successfully" });
-  } catch (err) {
-    console.error("Reset Password Error:", err);
-    res.status(500).json({ message: err.message });
-  }
-};
-
