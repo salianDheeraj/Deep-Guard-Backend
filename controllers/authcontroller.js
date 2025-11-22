@@ -1,3 +1,4 @@
+// controllers/authcontroller.js
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
@@ -7,91 +8,112 @@ const { supabase } = require("../config/supabase");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// -------------------------------
-// TOKEN + SESSION HELPERS
-// -------------------------------
+// -------------------------------------------------
+// COOKIE OPTIONS (MUST MATCH middleware)
+// -------------------------------------------------
+const COOKIE_OPTS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "strict",
+  path: "/"
+};
+
+
+
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
-const createAccessToken = (userId, email, tokenVersion) =>
-  jwt.sign(
-    { userId, email, tokenVersion },
-    process.env.JWT_SECRET,
-    { expiresIn: "15m" }
-  );
+const createAccessToken = (userId, email, version) =>
+  jwt.sign({ userId, email, tokenVersion: version }, process.env.JWT_SECRET, {
+    expiresIn: "15m",
+  });
 
-const createRefreshToken = (userId, email, tokenVersion) =>
+const createRefreshToken = (userId, email, version) =>
   jwt.sign(
-    { userId, email, tokenVersion },
+    { userId, email, tokenVersion: version },
     process.env.JWT_REFRESH_SECRET,
     { expiresIn: "30d" }
   );
 
 const setAuthCookies = (res, access, refresh) => {
   res.cookie("accessToken", access, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
+    ...COOKIE_OPTS,
     maxAge: 15 * 60 * 1000,
-    path: "/",
   });
 
   res.cookie("refreshToken", refresh, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
+    ...COOKIE_OPTS,
     maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+};
+
+const clearAuthCookies = (res) => {
+  res.clearCookie("accessToken", {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  });
+
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    sameSite: "strict",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
   });
 };
 
-const createSession = async (req, user, refreshToken) => {
-  const hashedRT = hashToken(refreshToken);
 
+const createSession = async (req, user, refreshToken) => {
+  const hashed = hashToken(refreshToken);
   await supabase.from("sessions").insert({
     user_id: user.id,
-    refresh_token_hash: hashedRT,
+    refresh_token_hash: hashed,
     token_version_snapshot: user.token_version,
     user_agent: req.headers["user-agent"],
     ip_address: req.ip,
-    expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
   });
 };
 
-// -------------------------------
-// EMAIL HELPERS
-// -------------------------------
+// -------------------------------------------------
+// EMAIL TRANSPORT
+// -------------------------------------------------
 const mailer = nodemailer.createTransport({
   service: "gmail",
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASSWORD },
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD,
+  },
 });
 
-// -------------------------------
-// FORMAT USER
-// -------------------------------
-const formatUser = (user) => ({
-  id: user.id,
-  name: user.name,
-  email: user.email,
+// -------------------------------------------------
+// FORMATTED USER RESPONSE
+// -------------------------------------------------
+const formatUser = (u) => ({
+  id: u.id,
+  name: u.name,
+  email: u.email,
   profilePicture:
-    user.profile_picture ||
-    `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.email}`,
+    u.profile_picture ||
+    `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.email}`,
 });
 
-// -------------------------------
-// OTP STORE (Signup Only)
-// -------------------------------
+// -------------------------------------------------
+// OTP STORES
+// -------------------------------------------------
 const signupOtpStore = new Map();
-const SIGNUP_OTP_EXPIRY_MS = 5 * 60 * 1000;
+const resetOtpStore = new Map();
 
-// -------------------------------
+const SIGNUP_EXP = 5 * 60 * 1000;
+const RESET_EXP = 5 * 60 * 1000;
+
+// -----------------------------------------------------
 // SEND SIGNUP OTP
-// -------------------------------
+// -----------------------------------------------------
 exports.sendSignupOtp = async (req, res) => {
   try {
     const { email, name } = req.body;
-    if (!email) return res.status(400).json({ message: "Email required" });
-
     const normalized = email.toLowerCase().trim();
 
     const { data: exists } = await supabase
@@ -107,27 +129,26 @@ exports.sendSignupOtp = async (req, res) => {
 
     signupOtpStore.set(normalized, {
       hashedOtp: hashed,
-      expiresAt: Date.now() + SIGNUP_OTP_EXPIRY_MS,
+      expiresAt: Date.now() + SIGNUP_EXP,
       name,
     });
 
     await mailer.sendMail({
       from: `"Deep Guard" <${process.env.EMAIL_USER}>`,
       to: normalized,
-      subject: "Verify your Deep Guard account",
+      subject: "Verify your account",
       html: `<h1>${otp}</h1>`,
     });
 
     res.json({ success: true });
   } catch (err) {
-    console.error("OTP error:", err);
     res.status(500).json({ message: "Failed to send OTP" });
   }
 };
 
-// -------------------------------
+// -----------------------------------------------------
 // SIGNUP
-// -------------------------------
+// -----------------------------------------------------
 exports.signup = async (req, res) => {
   try {
     const { email, password, name, otp } = req.body;
@@ -136,17 +157,15 @@ exports.signup = async (req, res) => {
     const entry = signupOtpStore.get(normalized);
     if (!entry) return res.status(400).json({ message: "OTP not requested" });
 
-    if (Date.now() > entry.expiresAt) {
-      signupOtpStore.delete(normalized);
+    if (Date.now() > entry.expiresAt)
       return res.status(400).json({ message: "OTP expired" });
-    }
 
-    const validOtp = await bcrypt.compare(otp, entry.hashedOtp);
-    if (!validOtp) return res.status(400).json({ message: "Invalid OTP" });
+    const valid = await bcrypt.compare(otp, entry.hashedOtp);
+    if (!valid) return res.status(400).json({ message: "Invalid OTP" });
 
     const hash = await bcrypt.hash(password, 10);
 
-    const { data: user, error } = await supabase
+    const { data: user } = await supabase
       .from("users")
       .insert({
         email: normalized,
@@ -157,30 +176,31 @@ exports.signup = async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
-
     signupOtpStore.delete(normalized);
 
     const access = createAccessToken(user.id, user.email, user.token_version);
-    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(
+      user.id,
+      user.email,
+      user.token_version
+    );
 
     await createSession(req, user, refresh);
-
     setAuthCookies(res, access, refresh);
 
-    res.status(201).json({ user: formatUser(user) });
+    res.json({ user: formatUser(user) });
   } catch (err) {
-    console.error("Signup Error:", err);
-    res.status(500).json({ message: "Internal error" });
+    res.status(500).json({ message: "Signup failed" });
   }
 };
 
-// -------------------------------
+// -----------------------------------------------------
 // LOGIN
-// -------------------------------
+// -----------------------------------------------------
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
+
     const normalized = email.toLowerCase().trim();
 
     const { data: user } = await supabase
@@ -189,29 +209,31 @@ exports.login = async (req, res) => {
       .eq("email", normalized)
       .single();
 
-    if (!user || !user.password_hash)
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (!user) return res.status(401).json({ message: "Invalid credentials" });
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ message: "Invalid credentials" });
+    if (!valid)
+      return res.status(401).json({ message: "Invalid credentials" });
 
     const access = createAccessToken(user.id, user.email, user.token_version);
-    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(
+      user.id,
+      user.email,
+      user.token_version
+    );
 
     await createSession(req, user, refresh);
-
     setAuthCookies(res, access, refresh);
 
     res.json({ user: formatUser(user) });
   } catch (err) {
-    console.error("Login error:", err);
-    res.status(500).json({ message: "Internal error" });
+    res.status(500).json({ message: "Login failed" });
   }
 };
 
-// -------------------------------
+// -----------------------------------------------------
 // GOOGLE LOGIN
-// -------------------------------
+// -----------------------------------------------------
 exports.googleLogin = async (req, res) => {
   try {
     const { credentials } = req.body;
@@ -247,89 +269,146 @@ exports.googleLogin = async (req, res) => {
     }
 
     const access = createAccessToken(user.id, user.email, user.token_version);
-    const refresh = createRefreshToken(user.id, user.email, user.token_version);
+    const refresh = createRefreshToken(
+      user.id,
+      user.email,
+      user.token_version
+    );
 
     await createSession(req, user, refresh);
     setAuthCookies(res, access, refresh);
 
     res.json({ user: formatUser(user) });
   } catch (err) {
-    console.error("Google Auth Error:", err);
     res.status(401).json({ message: "Invalid Google token" });
   }
 };
 
-// -------------------------------
-// REFRESH ENDPOINT DISABLED
-// -------------------------------
-exports.refresh = (req, res) => {
-  return res.status(400).json({
-    message: "Refresh handled automatically by middleware",
-  });
+// -----------------------------------------------------
+// SEND RESET OTP (FORGOT PASSWORD)
+// -----------------------------------------------------
+exports.sendResetOtp = async (req, res) => {
+  try {
+    const { email } = req.body;
+    const normalized = email.toLowerCase().trim();
+
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq("email", normalized)
+      .single();
+
+    if (!user)
+      return res.status(400).json({ message: "Email not found" });
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await bcrypt.hash(otp, 10);
+
+    resetOtpStore.set(normalized, {
+      hashedOtp,
+      expiresAt: Date.now() + RESET_EXP,
+    });
+
+    await mailer.sendMail({
+      from: `"Deep Guard" <${process.env.EMAIL_USER}>`,
+      to: normalized,
+      subject: "Reset Password",
+      html: `<h1>${otp}</h1>`,
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to send reset OTP" });
+  }
 };
 
-// -------------------------------
+// -----------------------------------------------------
+// RESET PASSWORD
+// -----------------------------------------------------
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+    const normalized = email.toLowerCase().trim();
+
+    const entry = resetOtpStore.get(normalized);
+
+    if (!entry)
+      return res.status(400).json({ message: "OTP not requested" });
+
+    if (Date.now() > entry.expiresAt) {
+      resetOtpStore.delete(normalized);
+      return res.status(400).json({ message: "OTP expired" });
+    }
+
+    const valid = await bcrypt.compare(otp, entry.hashedOtp);
+    if (!valid)
+      return res.status(400).json({ message: "Invalid OTP" });
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    const { data: user } = await supabase
+      .from("users")
+      .update({ password_hash: newHash })
+      .eq("email", normalized)
+      .select("id")
+      .single();
+
+    resetOtpStore.delete(normalized);
+    await supabase.from("sessions").delete().eq("user_id", user.id);
+
+    res.json({ success: true, message: "Password reset successful" });
+  } catch (err) {
+    res.status(500).json({ message: "Reset failed" });
+  }
+};
+
+// -----------------------------------------------------
 // GET ME
-// -------------------------------
+// -----------------------------------------------------
 exports.getMe = (req, res) => {
-  return res.json(formatUser(req.user));
+  res.json(formatUser(req.user));
 };
 
-// -------------------------------
-// LOGOUT (current session only)
-// -------------------------------
+// -----------------------------------------------------
+// LOGOUT (CURRENT SESSION)
+// -----------------------------------------------------
 exports.logout = async (req, res) => {
   try {
     const refreshToken = req.cookies.refreshToken;
 
     if (refreshToken) {
-      const hashedRT = hashToken(refreshToken);
+      const hashed = hashToken(refreshToken);
       await supabase
         .from("sessions")
         .delete()
-        .eq("refresh_token_hash", hashedRT);
+        .eq("refresh_token_hash", hashed);
     }
 
-    res.clearCookie("accessToken");
-    res.clearCookie("refreshToken");
-
-    return res.json({ success: true, message: "Logged out successfully" });
+    clearAuthCookies(res);
+    res.json({ success: true });
   } catch (err) {
-    console.error("Logout Error:", err);
-    res.status(500).json({ message: "Internal error" });
+    res.status(500).json({ message: "Logout failed" });
   }
 };
 
-// -------------------------------
+// -----------------------------------------------------
 // LOGOUT ALL DEVICES
-// -------------------------------
+// -----------------------------------------------------
 exports.logoutAllDevices = async (req, res) => {
   try {
-    const userId = req.user.id;
-
-    const { data: updated, error } = await supabase
-      .from("users")
-      .update({ token_version: req.user.tokenVersion + 1 })
-      .eq("id", userId)
-      .select("token_version")
-      .single();
-
-    if (error) throw error;
-
     await supabase
-      .from("sessions")
-      .delete()
-      .eq("user_id", userId);
+      .from("users")
+      .update({
+        token_version: req.user.tokenVersion + 1,
+      })
+      .eq("id", req.user.id);
 
-    res.clearCookie("accessToken");
-    res.clearCookie("refreshToken");
+    await supabase.from("sessions").delete().eq("user_id", req.user.id);
 
-    return res.json({
-      success: true,
-      message: "Logged out from all devices",
-    });
+    clearAuthCookies(res);
+
+    res.json({ success: true });
   } catch (err) {
-    console.error("Logout-All Error:", err);
-    res.status(500).json({ message: "Internal error" });
+    res.status(500).json({ message: "Logout-all failed" });
   }
 };

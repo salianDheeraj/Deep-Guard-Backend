@@ -308,7 +308,7 @@ const authMiddleware2 = require('../middleware/auth');
 const upload2 = multer2({ storage: multer2.memoryStorage() });
 
 // DOWNLOAD route - support images or frames ZIP
-router2.get('/:id/download', authMiddleware2, async (req, res) => {
+router.get('/:id/download', authMiddleware2, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user?.id;
@@ -362,4 +362,4 @@ router2.get('/:id/download', authMiddleware2, async (req, res) => {
 // The important compatibility changes are above: download uses annotated_images_path OR annotated_frames_path,
 // and update should accept annotated_images_path if provided.
 
-module.exports = router2;
+module.exports = router;
