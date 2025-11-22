@@ -1,188 +1,101 @@
-/**
- *  AUTH ROUTES (Final Version)
- *  Supports:
- *   - Signup / Login
- *   - Google OAuth Redirect + Callback
- *   - Me (Get user)
- *   - Update Profile
- *   - Change Password
- *   - Delete Analyses
- *   - Delete Account
- *   - Refresh Token
- */
-
 const express = require("express");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { createClient } = require("@supabase/supabase-js");
 const requireAuth = require("../middleware/auth");
+const { supabase } = require("../config/supabase");
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SERVICE_ROLE_KEY
-);
-
-// ---------------- TOKEN HELPERS ---------------- //
-const createAccessToken = (userId) =>
-  jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: "15m",
-  });
-
-const createRefreshToken = (userId) =>
-  jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, {
-    expiresIn: "7d",
-  });
-
-const setCookies = (res, access, refresh) => {
-  res.cookie("accessToken", access, {
-    httpOnly: true,
-    sameSite: "strict",
-    secure: false,
-    maxAge: 15 * 60 * 1000,
-    path: "/",
-  });
-
-  res.cookie("refreshToken", refresh, {
-    httpOnly: true,
-    sameSite: "strict",
-    secure: false,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: "/",
-  });
-};
-
-// ---------------- FORMAT USER ---------------- //
-const cleanUser = (u) => ({
-  id: u.id,
-  name: u.name,
-  email: u.email,
-  profile_pic:
-    u.profile_pic ||
-    `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.email}`,
+// Format user helper
+const formatUser = (user) => ({
+  id: user.id,
+  name: user.name,
+  email: user.email,
+  profile_picture:
+    user.profile_picture ||
+    `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.email}`,
 });
-
-// Google OAuth has been removed. Only local signup/login remains.
-
-// ============================================================
-// SIGNUP
-// ============================================================
-router.post("/signup", async (req, res) => {
+// ------------------------------------
+// GET LOGGED-IN USER PROFILE
+// ------------------------------------
+router.get("/me", requireAuth, async (req, res) => {
   try {
-    const { email, password, name } = req.body;
-
-    const { data: exists } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
-
-    if (exists) {
-      return res.status(400).json({ message: "User already exists" });
-    }
-
-    const hash = await bcrypt.hash(password, 10);
-
     const { data, error } = await supabase
       .from("users")
-      .insert({
-        email,
-        name,
-        password_hash: hash,
-      })
-      .select()
+      .select("id, name, email, profile_picture")
+      .eq("id", req.user.id)
       .single();
 
-    if (error) throw error;
+    if (error || !data) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
-    const access = createAccessToken(data.id);
-    const refresh = createRefreshToken(data.id);
-
-    setCookies(res, access, refresh);
-
-    res.json({ user: cleanUser(data) });
+    res.json({
+      id: data.id,
+      name: data.name,
+      email: data.email,
+      profile_pic: data.profile_picture,
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error("GET /me Error:", err);
+    res.status(500).json({ message: "Failed to load profile" });
   }
 });
 
-// ============================================================
-// LOGIN
-// ============================================================
-router.post("/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
 
-    const { data: user } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
-
-    if (!user) return res.status(401).json({ message: "Invalid credentials" });
-
-    if (!user.password_hash)
-      return res.status(401).json({ message: "Google account detected" });
-
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) return res.status(401).json({ message: "Invalid credentials" });
-
-    const access = createAccessToken(user.id);
-    const refresh = createRefreshToken(user.id);
-
-    setCookies(res, access, refresh);
-
-    res.json({ user: cleanUser(user) });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ============================================================
-// GET PROFILE
-// ============================================================
-router.get("/me", requireAuth, async (req, res) => {
-  res.json(cleanUser(req.user));
-});
-
-// ============================================================
-// UPDATE PROFILE
-// ============================================================
+// ------------------------------------
 router.put("/update-profile", requireAuth, async (req, res) => {
   try {
     const { name, profile_pic } = req.body;
 
+    const updateFields = {};
+
+    if (name !== undefined) updateFields.name = name;
+    if (profile_pic !== undefined) updateFields.profile_picture = profile_pic;
+
     const { data, error } = await supabase
       .from("users")
-      .update({ name, profile_pic })
+      .update(updateFields)
       .eq("id", req.user.id)
       .select()
       .single();
 
     if (error) throw error;
 
-    res.json({ message: "Updated", user: cleanUser(data) });
+    return res.json({
+      success: true,
+      user: {
+        id: data.id,
+        name: data.name,
+        email: data.email,
+        profile_picture: data.profile_picture, // NO FALLBACK
+      },
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error("Profile Update Error:", err);
+    return res.status(500).json({ message: "Failed to update profile" });
   }
 });
 
-// ============================================================
+
+// ------------------------------------
 // CHANGE PASSWORD
-// ============================================================
+// ------------------------------------
 router.post("/change-password", requireAuth, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
 
-    const valid = await bcrypt.compare(
-      current_password,
-      req.user.password_hash
-    );
+    const { data: user } = await supabase
+      .from("users")
+      .select("password_hash")
+      .eq("id", req.user.id)
+      .single();
 
-    if (!valid) {
-      return res.status(401).json({ message: "Incorrect password" });
-    }
+    if (!user.password_hash)
+      return res.status(400).json({ message: "Password login not enabled" });
+
+    const valid = await bcrypt.compare(current_password, user.password_hash);
+    if (!valid)
+      return res.status(401).json({ message: "Incorrect current password" });
 
     const hashed = await bcrypt.hash(new_password, 10);
 
@@ -191,55 +104,86 @@ router.post("/change-password", requireAuth, async (req, res) => {
       .update({ password_hash: hashed })
       .eq("id", req.user.id);
 
-    res.json({ message: "Password updated" });
+    res.json({ success: true, message: "Password updated successfully" });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error("Password Change Error:", err);
+    res.status(500).json({ message: "Failed to change password" });
+  }
+});
+router.delete("/delete-analyses", requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("analyses")
+      .delete()
+      .eq("user_id", req.user.id);
+
+    if (error) throw error;
+
+    res.json({ success: true, message: "All analyses deleted." });
+  } catch (err) {
+    console.error("Delete Analyses Error:", err);
+    res.status(500).json({ message: "Failed to delete analyses" });
+  }
+});
+// -------------------------------
+// LOGOUT OTHER DEVICES (but keep current device)
+// -------------------------------
+// ------------------------------------
+// LOGOUT ALL DEVICES (invalidate everyone, including this browser)
+// ------------------------------------
+router.post("/logout-all", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Increase token_version → invalidates ALL existing JWTs
+    const { data: updated, error: versionError } = await supabase
+      .from("users")
+      .update({ token_version: req.user.tokenVersion + 1 })
+      .eq("id", userId)
+      .select("token_version")
+      .single();
+
+    if (versionError) throw versionError;
+
+    // 2. Remove ALL sessions from DB
+    const { error: sessionError } = await supabase
+      .from("sessions")
+      .delete()
+      .eq("user_id", userId);
+
+    if (sessionError) throw sessionError;
+
+    // 3. Clear cookies from current device
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
+
+    return res.json({
+      success: true,
+      message: "Logged out from all devices",
+    });
+  } catch (err) {
+    console.error("Logout-All Error:", err);
+    res.status(500).json({ message: "Internal error" });
   }
 });
 
-// ============================================================
-// DELETE ANALYSES
-// ============================================================
-router.delete("/delete-analyses", requireAuth, async (req, res) => {
-  await supabase.from("analyses").delete().eq("user_id", req.user.id);
-  res.json({ message: "All analyses deleted" });
-});
 
-// ============================================================
-// DELETE ACCOUNT
-// ============================================================
 router.delete("/delete-account", requireAuth, async (req, res) => {
-  await supabase.from("analyses").delete().eq("user_id", req.user.id);
-  await supabase.from("users").delete().eq("id", req.user.id);
-
-  res.clearCookie("accessToken", { path: "/" });
-  res.clearCookie("refreshToken", { path: "/" });
-
-  res.json({ message: "Account deleted" });
-});
-
-// ============================================================
-// REFRESH TOKEN
-// ============================================================
-router.post("/refresh", (req, res) => {
   try {
-    const token = req.cookies.refreshToken;
-    if (!token) return res.status(401).json({ message: "No refresh token" });
+    const { error } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", req.user.id);
 
-    const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+    if (error) throw error;
 
-    const newAccess = createAccessToken(decoded.userId);
+    res.clearCookie("accessToken");
+    res.clearCookie("refreshToken");
 
-    res.cookie("accessToken", newAccess, {
-      httpOnly: true,
-      sameSite: "strict",
-      secure: false,
-      maxAge: 15 * 60 * 1000,
-    });
-
-    res.json({ message: "Refreshed" });
+    res.json({ success: true, message: "Account deleted." });
   } catch (err) {
-    res.status(401).json({ message: "Invalid refresh token" });
+    console.error("Delete Account Error:", err);
+    res.status(500).json({ message: "Failed to delete account" });
   }
 });
 

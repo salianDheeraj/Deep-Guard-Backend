@@ -8,12 +8,14 @@ router.post("/signup", authController.signup);
 router.post("/login", authController.login);
 router.post("/google", authController.googleLogin);
 
-router.post("/send-reset-otp", authController.sendResetOtp);
-
-
+// REMOVE THESE (they do not exist anymore)
+ router.post("/send-reset-otp", authController.sendResetOtp);
 router.post("/reset-password", authController.resetPassword);
 
 router.get("/me", authMiddleware, authController.getMe);
-router.post("/refresh", authController.refresh);
+/* router.post("/refresh", authController.refresh); */
+
+router.post("/logout", authMiddleware, authController.logout);
+router.post("/logout-all", authMiddleware, authController.logoutAllDevices);
 
 module.exports = router;
