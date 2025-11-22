@@ -1,6 +1,17 @@
+// middleware/auth.js
 const jwt = require("jsonwebtoken");
 const { supabase } = require("../config/supabase");
 const crypto = require("crypto");
+
+// Shared cookie options – must match controller
+const COOKIE_OPTS = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: "strict",
+  path: "/"
+};
+
+
 
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -13,27 +24,29 @@ const authMiddleware = async (req, res, next) => {
     const refreshToken = req.cookies.refreshToken || null;
 
     if (!accessToken && !refreshToken) {
-      return res.status(401).json({ code: "NO_TOKENS", message: "Not authorized" });
+      return res.status(401).json({
+        code: "NO_TOKENS",
+        message: "Not authorized",
+      });
     }
 
     let decoded = null;
 
-    // -------------------------------------------------
-    // 1. Try ACCESS TOKEN
-    // -------------------------------------------------
+    // 1. Try access token
     if (accessToken) {
       try {
         decoded = jwt.verify(accessToken, process.env.JWT_SECRET);
       } catch (err) {
         if (err.name !== "TokenExpiredError") {
-          return res.status(401).json({ code: "INVALID_ACCESS", message: "Invalid token" });
+          return res.status(401).json({
+            code: "INVALID_ACCESS",
+            message: "Invalid token",
+          });
         }
       }
     }
 
-    // -------------------------------------------------
-    // 2. If no access token → try REFRESH TOKEN
-    // -------------------------------------------------
+    // 2. Try refresh token if access missing/expired
     if (!decoded && refreshToken) {
       let refreshDecoded;
 
@@ -45,11 +58,11 @@ const authMiddleware = async (req, res, next) => {
       } catch (err) {
         return res.status(401).json({
           code: "INVALID_REFRESH",
-          message: "Session expired, please login again",
+          message: "Session expired",
         });
       }
 
-      // 2A: Validate refresh token in sessions table
+      // Validate refresh in DB
       const hashedRT = hashToken(refreshToken);
 
       const { data: session } = await supabase
@@ -62,14 +75,11 @@ const authMiddleware = async (req, res, next) => {
       if (!session) {
         return res.status(401).json({
           code: "REFRESH_NOT_FOUND",
-          message: "Session expired, login again",
+          message: "Session expired",
         });
       }
 
-      // 2B: Skip strict UA check (Chrome updates its UA frequently)
-      // (Intentionally disabled)
-
-      // 2C: Confirm token version is still valid
+      // Validate token_version
       const { data: userData } = await supabase
         .from("users")
         .select("token_version")
@@ -83,7 +93,7 @@ const authMiddleware = async (req, res, next) => {
         });
       }
 
-      // 2D: Rotate refresh token
+      // Rotate refresh token
       const newRefreshToken = jwt.sign(
         {
           userId: refreshDecoded.userId,
@@ -94,26 +104,23 @@ const authMiddleware = async (req, res, next) => {
         { expiresIn: "30d" }
       );
 
-      const newRefreshHash = hashToken(newRefreshToken);
+      const newHash = hashToken(newRefreshToken);
 
       await supabase
         .from("sessions")
         .update({
-          refresh_token_hash: newRefreshHash,
+          refresh_token_hash: newHash,
           user_agent: req.headers["user-agent"],
           ip_address: req.ip,
         })
         .eq("id", session.id);
 
       res.cookie("refreshToken", newRefreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "strict",
+        ...COOKIE_OPTS,
         maxAge: 30 * 24 * 60 * 60 * 1000,
-        path: "/",
       });
 
-      // 2E: Issue new access token
+      // New access token
       const newAccessToken = jwt.sign(
         {
           userId: refreshDecoded.userId,
@@ -125,24 +132,21 @@ const authMiddleware = async (req, res, next) => {
       );
 
       res.cookie("accessToken", newAccessToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "strict",
+        ...COOKIE_OPTS,
         maxAge: 15 * 60 * 1000,
-        path: "/",
       });
 
       decoded = refreshDecoded;
     }
 
     if (!decoded) {
-      return res.status(401).json({ code: "AUTH_FAILED", message: "Not authorized" });
+      return res.status(401).json({
+        code: "AUTH_FAILED",
+        message: "Not authorized",
+      });
     }
 
-    // -------------------------------------------------
-    // 3. Fetch user FROM DATABASE
-    // FIXED: correct column name "profile_picture"
-    // -------------------------------------------------
+    // Fetch user
     const { data: user } = await supabase
       .from("users")
       .select("id, name, email, profile_picture, token_version")
@@ -150,12 +154,13 @@ const authMiddleware = async (req, res, next) => {
       .single();
 
     if (!user) {
-      return res.status(401).json({ code: "USER_NOT_FOUND", message: "User not found" });
+      return res.status(401).json({
+        code: "USER_NOT_FOUND",
+        message: "User not found",
+      });
     }
 
-    // -------------------------------------------------
-    // 4. Token version validation
-    // -------------------------------------------------
+    // Validate version
     if (user.token_version !== decoded.tokenVersion) {
       return res.status(401).json({
         code: "TOKEN_VERSION_MISMATCH",
@@ -163,14 +168,11 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    // -------------------------------------------------
-    // 5. Attach sanitized user object
-    // -------------------------------------------------
     req.user = {
       id: user.id,
       name: user.name,
       email: user.email,
-      profile_pic: user.profile_picture, // mapped correctly
+      profile_pic: user.profile_picture,
       tokenVersion: user.token_version,
     };
 

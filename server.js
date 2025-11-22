@@ -51,7 +51,8 @@ app.use("/api/account",authMiddleware, accountRoutes);    // ✔ updated path
 
 // ANALYSIS ROUTES (upload + results)
 app.use("/api/analysis",authMiddleware, analysisRouter);
-app.use('/ml-service-images',authMiddleware, mlServiceImagesRoutes); // NEW
+app.use('/api/ml/images', authMiddleware, mlServiceImagesRoutes);
+ 
 // ML SERVICE ROUTE
 app.use("/api/ml/analyze",authMiddleware, mlServices);
 
