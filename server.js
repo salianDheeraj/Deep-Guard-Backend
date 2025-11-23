@@ -5,64 +5,58 @@ const path = require("path");
 const cookieParser = require("cookie-parser");
 const logger = require("./middleware/logger");
 const errorHandler = require("./middleware/errorHandler");
-const authMiddleware=require("./middleware/auth")
+const authMiddleware = require("./middleware/auth");
 dotenv.config();
 
 /* ---------------------- ROUTES ---------------------- */
-const authRoutes = require("./routes/auth");              // ✔ Fixed
-const accountRoutes = require("./routes/update_profile");  // ✔ Fixed (update profile, change password, delete)
+const authRoutes = require("./routes/auth");
+const accountRoutes = require("./routes/update_profile");
 const mlServices = require("./routes/ml-service");
 const analysisRouter = require("./routes/analysis");
-const mlServiceImagesRoutes = require('./routes/ml-service-images'); 
-/* ---------------------------------------------------- */
+const imageAnalysisRoutes = require("./routes/analysis-image-upload");
+const mlServiceImagesRoutes = require("./routes/ml-service-images");
 
 const app = express();
 
 /* ------------------ GLOBAL MIDDLEWARE ------------------ */
-
-
 app.use(
   cors({
     origin: "http://localhost:3000",
-    credentials: true,   // ✔ allows cookies
+    credentials: true,
   })
 );
+
 app.use(logger);
-app.use(cookieParser());    // ✔ required for auth cookies
-app.use(express.json({
-    // Add a verify function to capture the raw body for debugging
-    verify: (req, res, buf) => {
-      
-        if (buf && buf.length) {
-            req.rawBody = buf.toString();
-        }
-    }
-}));
+app.use(cookieParser());
+app.use("/api/analysis/image", authMiddleware, imageAnalysisRoutes);
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 /* ---------------------- ROUTES ---------------------- */
 
-// AUTH (Login, Signup, Google Auth, Refresh, Me)
-app.use("/auth", authRoutes);              // ✔ main auth route
+// AUTH (no auth middleware here)
+app.use("/auth", authRoutes);
 
-// ACCOUNT ROUTES (update profile, change password, delete)
-app.use("/api/account",authMiddleware, accountRoutes);    // ✔ updated path
+// ACCOUNT ROUTES
+app.use("/api/account", authMiddleware, accountRoutes);
 
-// ANALYSIS ROUTES (upload + results)
-app.use("/api/analysis",authMiddleware, analysisRouter);
-app.use('/api/ml/images', authMiddleware, mlServiceImagesRoutes);
- 
-// ML SERVICE ROUTE
-app.use("/api/ml/analyze",authMiddleware, mlServices);
+// IMAGE UPLOAD (NOT ML)
+app.use("/api/analysis/image", authMiddleware, imageAnalysisRoutes);
 
+// ANALYSIS ROUTES (video upload)
+app.use("/api/analysis", authMiddleware, analysisRouter);
 
-// SERVER HEALTH CHECK
+// ************* IMPORTANT ORDER ************* //
+// IMAGE ML must come before VIDEO ML
+app.use("/api/ml/images", authMiddleware, mlServiceImagesRoutes);
+app.use("/api/ml/analyze", authMiddleware, mlServices);
+// ******************************************* //
+
 app.get("/", (req, res) => {
   res.json({ status: "Backend running 🚀" });
 });
 
-// ERROR HANDLER
 app.use(errorHandler);
 
 /* --------------------- START SERVER --------------------- */
