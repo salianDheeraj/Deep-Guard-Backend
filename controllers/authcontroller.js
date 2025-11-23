@@ -361,6 +361,85 @@ exports.resetPassword = async (req, res) => {
     res.status(500).json({ message: "Reset failed" });
   }
 };
+exports.refresh = async (req, res) => {
+  try {
+    const refreshToken = req.cookies.refreshToken;
+    if (!refreshToken)
+      return res.status(401).json({ message: "No refresh token" });
+
+    // 1. Verify JWT signature
+    let payload;
+    try {
+      payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    } catch (err) {
+      return res.status(401).json({ message: "Invalid refresh token" });
+    }
+
+    const { userId, email, tokenVersion } = payload;
+
+    // 2. Hash token and check it exists in sessions
+    const hashed = hashToken(refreshToken);
+
+    const { data: session } = await supabase
+      .from("sessions")
+      .select("*")
+      .eq("refresh_token_hash", hashed)
+      .single();
+
+    if (!session)
+      return res.status(401).json({ message: "Session not found" });
+
+    // 3. Verify token_version has not changed
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, email, token_version")
+      .eq("id", userId)
+      .single();
+
+    if (!user)
+      return res.status(401).json({ message: "User not found" });
+
+    if (user.token_version !== tokenVersion) {
+      // version mismatch = user logged out everywhere
+      await supabase.from("sessions").delete().eq("user_id", userId);
+      clearAuthCookies(res);
+      return res.status(401).json({ message: "Token version invalid" });
+    }
+
+    // 4. Rotate refresh token
+    const newAccess = createAccessToken(user.id, user.email, user.token_version);
+    const newRefresh = createRefreshToken(user.id, user.email, user.token_version);
+    const newHash = hashToken(newRefresh);
+
+    // delete old session
+    await supabase
+      .from("sessions")
+      .delete()
+      .eq("refresh_token_hash", hashed);
+
+    // insert new session
+    await supabase.from("sessions").insert({
+      user_id: user.id,
+      refresh_token_hash: newHash,
+      token_version_snapshot: user.token_version,
+      user_agent: req.headers["user-agent"],
+      ip_address: req.ip,
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+    });
+
+    // 5. Set new cookies
+    setAuthCookies(res, newAccess, newRefresh);
+
+    return res.json({
+      success: true,
+      accessToken: newAccess,
+    });
+
+  } catch (err) {
+    console.error("REFRESH ERROR:", err);
+    return res.status(500).json({ message: "Refresh failed" });
+  }
+};
 
 // -----------------------------------------------------
 // GET ME
