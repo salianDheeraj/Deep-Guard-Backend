@@ -87,7 +87,11 @@ router.post(
 // The screenshot shows FastAPI expects POST /detect/deepfake/images
 // with multipart/form-data under the "files" field.
 
-const ML_ENDPOINT = `${ML_URL}/detect/deepfake/images`;/ already includes /detect/deepfake/images
+// Ensure ML_ENDPOINT includes the expected path. If ML_URL already points
+// directly to the `/detect/deepfake/images` endpoint, use it as-is.
+const ML_ENDPOINT = ML_URL && ML_URL.endsWith("/detect/deepfake/images")
+  ? ML_URL
+  : `${ML_URL}/detect/deepfake/images`;
 
 console.log("📤 SENDING IMAGES →", ML_ENDPOINT);
 

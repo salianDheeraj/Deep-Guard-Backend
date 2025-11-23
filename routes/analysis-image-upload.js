@@ -32,27 +32,38 @@ router.post(
         });
       }
 
-      // ------------------ 1. CREATE ANALYSIS ENTRY ------------------
+      // ------------------ 1. PREPARE ANALYSIS ENTRY ------------------
+      // The `analyses` table requires non-null filename, file_path and file_size.
+      // Compute summary info from incoming files so we can insert a valid row
+      // and still use the generated analysisId when forming upload paths.
+      const uploadedPaths = [];
+      const fileNames = req.files.map((f) => f.originalname || "image");
+      const totalSize = req.files.reduce((s, f) => s + (f.size || 0), 0);
+
+      const initialInsert = {
+        user_id: userId,
+        type: "image",
+        // DB allowed statuses: 'pending', 'processing', 'completed', 'failed'
+        // use 'pending' for newly created analyses to satisfy the CHECK constraint
+        status: "pending",
+        bucket: "image_analyses",
+        filename: fileNames[0] || "image",
+        file_path: JSON.stringify([]),
+        file_size: totalSize,
+      };
+
       const { data: analysisRow, error: analysisErr } = await supabaseAdmin
         .from("analyses")
-        .insert([
-          {
-            user_id: userId,
-            type: "image",
-            status: "uploading",
-            bucket: "image_analyses",
-          },
-        ])
+        .insert([initialInsert])
         .select()
         .single();
 
-      if (analysisErr) {
+      if (analysisErr || !analysisRow) {
         console.error(analysisErr);
         throw new Error("Failed to create analysis record");
       }
 
       const analysisId = analysisRow.id;
-      const uploadedPaths = [];
 
       // ------------------ 2. UPLOAD EACH IMAGE ------------------
       for (const file of req.files) {
@@ -81,7 +92,8 @@ router.post(
         .from("analyses")
         .update({
           file_path: JSON.stringify(uploadedPaths),
-          status: "uploaded",
+          // move to 'processing' so the ML worker knows it's ready
+          status: "processing",
           updated_at: new Date().toISOString(),
         })
         .eq("id", analysisId);
