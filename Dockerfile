@@ -2,7 +2,7 @@ FROM node:20-alpine
 
 WORKDIR /usr/src/app
 
-# Install production dependencies (use npm install to avoid lockfile mismatch during image builds)
+# Install production dependencies
 COPY package*.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
