@@ -1,26 +1,22 @@
-# Stage 1: Builder - Installs dependencies
-FROM node:20-alpine AS builder
+# Base image for production
+FROM node:20-alpine
+
+# Create and set the working directory
 WORKDIR /usr/src/app
 
-# Copy and install dependencies. This layer is only rebuilt if package.json changes.
+# Copy package files and install dependencies
+# This is inefficient, as it forces a reinstall on every code change, but it is simple.
 COPY package*.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
 # Copy the rest of the application code
 COPY . .
 
-# Stage 2: Production - Creates a lean final image
-FROM node:20-alpine
-WORKDIR /usr/src/app
-
-# Copy only the necessary files from the builder stage
-COPY --from=builder /usr/src/app .
-
 # Set environment variables
 ENV NODE_ENV=production
 ENV PORT=5000
 
-# The exposed port must match the PORT env var
+# Expose the application port
 EXPOSE 5000
 
 # Command to run the application
